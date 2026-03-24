@@ -1,0 +1,6 @@
+.build/
+*.light
+dump_light_cache
+test_hash
+test_fill_mix
+dump_kernel

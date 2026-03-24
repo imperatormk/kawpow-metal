@@ -120,15 +120,190 @@ func rpcCall(_ method: String, params: [Any] = []) async throws -> Any {
     return json["result"]!
 }
 
+// MARK: - Keccak (for light cache generation)
+func keccakf1600(_ state: inout [UInt64]) {
+    let rc: [UInt64] = [
+        0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+        0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+        0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+        0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+        0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+        0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
+    ]
+    func rol(_ x: UInt64, _ s: UInt64) -> UInt64 { (x << s) | (x >> (64 - s)) }
+    var Aba=state[0],Abe=state[1],Abi=state[2],Abo=state[3],Abu=state[4]
+    var Aga=state[5],Age=state[6],Agi=state[7],Ago=state[8],Agu=state[9]
+    var Aka=state[10],Ake=state[11],Aki=state[12],Ako=state[13],Aku=state[14]
+    var Ama=state[15],Ame=state[16],Ami=state[17],Amo=state[18],Amu=state[19]
+    var Asa=state[20],Ase=state[21],Asi=state[22],Aso=state[23],Asu=state[24]
+    var Ba:UInt64,Be:UInt64,Bi:UInt64,Bo:UInt64,Bu:UInt64
+    var Da:UInt64,De:UInt64,Di:UInt64,Do:UInt64,Du:UInt64
+    var Eba:UInt64,Ebe:UInt64,Ebi:UInt64,Ebo:UInt64,Ebu:UInt64
+    var Ega:UInt64,Ege:UInt64,Egi:UInt64,Ego:UInt64,Egu:UInt64
+    var Eka:UInt64,Eke:UInt64,Eki:UInt64,Eko:UInt64,Eku:UInt64
+    var Ema:UInt64,Eme:UInt64,Emi:UInt64,Emo:UInt64,Emu:UInt64
+    var Esa:UInt64,Ese:UInt64,Esi:UInt64,Eso:UInt64,Esu:UInt64
+    for round in stride(from: 0, to: 24, by: 2) {
+        Ba=Aba^Aga^Aka^Ama^Asa; Be=Abe^Age^Ake^Ame^Ase
+        Bi=Abi^Agi^Aki^Ami^Asi; Bo=Abo^Ago^Ako^Amo^Aso; Bu=Abu^Agu^Aku^Amu^Asu
+        Da=Bu^rol(Be,1); De=Ba^rol(Bi,1); Di=Be^rol(Bo,1); Do=Bi^rol(Bu,1); Du=Bo^rol(Ba,1)
+        Ba=Aba^Da; Be=rol(Age^De,44); Bi=rol(Aki^Di,43); Bo=rol(Amo^Do,21); Bu=rol(Asu^Du,14)
+        Eba=Ba^(~Be&Bi)^rc[round]; Ebe=Be^(~Bi&Bo); Ebi=Bi^(~Bo&Bu); Ebo=Bo^(~Bu&Ba); Ebu=Bu^(~Ba&Be)
+        Ba=rol(Abo^Do,28); Be=rol(Agu^Du,20); Bi=rol(Aka^Da,3); Bo=rol(Ame^De,45); Bu=rol(Asi^Di,61)
+        Ega=Ba^(~Be&Bi); Ege=Be^(~Bi&Bo); Egi=Bi^(~Bo&Bu); Ego=Bo^(~Bu&Ba); Egu=Bu^(~Ba&Be)
+        Ba=rol(Abe^De,1); Be=rol(Agi^Di,6); Bi=rol(Ako^Do,25); Bo=rol(Amu^Du,8); Bu=rol(Asa^Da,18)
+        Eka=Ba^(~Be&Bi); Eke=Be^(~Bi&Bo); Eki=Bi^(~Bo&Bu); Eko=Bo^(~Bu&Ba); Eku=Bu^(~Ba&Be)
+        Ba=rol(Abu^Du,27); Be=rol(Aga^Da,36); Bi=rol(Ake^De,10); Bo=rol(Ami^Di,15); Bu=rol(Aso^Do,56)
+        Ema=Ba^(~Be&Bi); Eme=Be^(~Bi&Bo); Emi=Bi^(~Bo&Bu); Emo=Bo^(~Bu&Ba); Emu=Bu^(~Ba&Be)
+        Ba=rol(Abi^Di,62); Be=rol(Ago^Do,55); Bi=rol(Aku^Du,39); Bo=rol(Ama^Da,41); Bu=rol(Ase^De,2)
+        Esa=Ba^(~Be&Bi); Ese=Be^(~Bi&Bo); Esi=Bi^(~Bo&Bu); Eso=Bo^(~Bu&Ba); Esu=Bu^(~Ba&Be)
+        Ba=Eba^Ega^Eka^Ema^Esa; Be=Ebe^Ege^Eke^Eme^Ese
+        Bi=Ebi^Egi^Eki^Emi^Esi; Bo=Ebo^Ego^Eko^Emo^Eso; Bu=Ebu^Egu^Eku^Emu^Esu
+        Da=Bu^rol(Be,1); De=Ba^rol(Bi,1); Di=Be^rol(Bo,1); Do=Bi^rol(Bu,1); Du=Bo^rol(Ba,1)
+        Ba=Eba^Da; Be=rol(Ege^De,44); Bi=rol(Eki^Di,43); Bo=rol(Emo^Do,21); Bu=rol(Esu^Du,14)
+        Aba=Ba^(~Be&Bi)^rc[round+1]; Abe=Be^(~Bi&Bo); Abi=Bi^(~Bo&Bu); Abo=Bo^(~Bu&Ba); Abu=Bu^(~Ba&Be)
+        Ba=rol(Ebo^Do,28); Be=rol(Egu^Du,20); Bi=rol(Eka^Da,3); Bo=rol(Eme^De,45); Bu=rol(Esi^Di,61)
+        Aga=Ba^(~Be&Bi); Age=Be^(~Bi&Bo); Agi=Bi^(~Bo&Bu); Ago=Bo^(~Bu&Ba); Agu=Bu^(~Ba&Be)
+        Ba=rol(Ebe^De,1); Be=rol(Egi^Di,6); Bi=rol(Eko^Do,25); Bo=rol(Emu^Du,8); Bu=rol(Esa^Da,18)
+        Aka=Ba^(~Be&Bi); Ake=Be^(~Bi&Bo); Aki=Bi^(~Bo&Bu); Ako=Bo^(~Bu&Ba); Aku=Bu^(~Ba&Be)
+        Ba=rol(Ebu^Du,27); Be=rol(Ega^Da,36); Bi=rol(Eke^De,10); Bo=rol(Emi^Di,15); Bu=rol(Eso^Do,56)
+        Ama=Ba^(~Be&Bi); Ame=Be^(~Bi&Bo); Ami=Bi^(~Bo&Bu); Amo=Bo^(~Bu&Ba); Amu=Bu^(~Ba&Be)
+        Ba=rol(Ebi^Di,62); Be=rol(Ego^Do,55); Bi=rol(Eku^Du,39); Bo=rol(Ema^Da,41); Bu=rol(Ese^De,2)
+        Asa=Ba^(~Be&Bi); Ase=Be^(~Bi&Bo); Asi=Bi^(~Bo&Bu); Aso=Bo^(~Bu&Ba); Asu=Bu^(~Ba&Be)
+    }
+    state[0]=Aba;state[1]=Abe;state[2]=Abi;state[3]=Abo;state[4]=Abu
+    state[5]=Aga;state[6]=Age;state[7]=Agi;state[8]=Ago;state[9]=Agu
+    state[10]=Aka;state[11]=Ake;state[12]=Aki;state[13]=Ako;state[14]=Aku
+    state[15]=Ama;state[16]=Ame;state[17]=Ami;state[18]=Amo;state[19]=Amu
+    state[20]=Asa;state[21]=Ase;state[22]=Asi;state[23]=Aso;state[24]=Asu
+}
+
+func keccak(_ data: [UInt8], bits: Int) -> [UInt8] {
+    let hashSize = bits / 8
+    let blockSize = (1600 - bits * 2) / 8
+    var state = [UInt64](repeating: 0, count: 25)
+    var pos = 0
+    // Absorb full blocks
+    while data.count - pos >= blockSize {
+        for i in 0..<(blockSize / 8) {
+            state[i] ^= data.withUnsafeBytes { $0.load(fromByteOffset: pos + i * 8, as: UInt64.self) }
+        }
+        keccakf1600(&state)
+        pos += blockSize
+    }
+    // Absorb remaining bytes
+    var stateIdx = 0
+    var lastWord: UInt64 = 0
+    var lastPos = 0
+    while data.count - pos >= 8 {
+        state[stateIdx] ^= data.withUnsafeBytes { $0.load(fromByteOffset: pos, as: UInt64.self) }
+        stateIdx += 1; pos += 8
+    }
+    while pos < data.count { lastWord |= UInt64(data[pos]) << (lastPos * 8); lastPos += 1; pos += 1 }
+    lastWord |= UInt64(0x01) << (lastPos * 8)
+    state[stateIdx] ^= lastWord
+    state[(blockSize / 8) - 1] ^= 0x8000000000000000
+    keccakf1600(&state)
+    // Squeeze
+    var out = [UInt8](repeating: 0, count: hashSize)
+    for i in 0..<(hashSize / 8) {
+        var w = state[i]
+        for j in 0..<8 { out[i * 8 + j] = UInt8(w & 0xff); w >>= 8 }
+    }
+    return out
+}
+
+func keccak256(_ data: [UInt8]) -> [UInt8] { keccak(data, bits: 256) }
+func keccak512(_ data: [UInt8]) -> [UInt8] { keccak(data, bits: 512) }
+
+// MARK: - Light Cache Generation
+func findLargestPrime(_ upperBound: Int) -> Int {
+    var n = upperBound
+    if n < 2 { return 0 }
+    if n == 2 { return 2 }
+    if n % 2 == 0 { n -= 1 }
+    while true {
+        var isPrime = true
+        var d = 3
+        while Int64(d) * Int64(d) <= Int64(n) {
+            if n % d == 0 { isPrime = false; break }
+            d += 2
+        }
+        if isPrime { return n }
+        n -= 2
+    }
+}
+
+func generateLightCache(epoch: Int) -> (lightItems: Int, datasetItems: Int, cache: [UInt8]) {
+    let LIGHT_CACHE_INIT = 262144   // (1 << 24) / 64
+    let LIGHT_CACHE_GROWTH = 2048   // (1 << 17) / 64
+    let DATASET_INIT = 8388608      // (1 << 30) / 128
+    let DATASET_GROWTH = 65536      // (1 << 23) / 128
+    let CACHE_ROUNDS = 3
+
+    let lightItems = findLargestPrime(LIGHT_CACHE_INIT + epoch * LIGHT_CACHE_GROWTH)
+    let datasetItems = findLargestPrime(DATASET_INIT + epoch * DATASET_GROWTH)
+
+    print("  Computing seed hash...")
+    // Seed = keccak256 applied epoch times to zeros
+    var seed = [UInt8](repeating: 0, count: 32)
+    for _ in 0..<epoch { seed = keccak256(seed) }
+
+    print("  Building cache: \(lightItems) items (\(lightItems * 64 / 1024 / 1024) MB)...")
+    var cache = [UInt8](repeating: 0, count: lightItems * 64)
+
+    // Phase 1: Sequential keccak512
+    let first = keccak512(seed)
+    cache.replaceSubrange(0..<64, with: first)
+    for i in 1..<lightItems {
+        let prev = Array(cache[(i-1)*64..<i*64])
+        let item = keccak512(prev)
+        cache.replaceSubrange(i*64..<(i+1)*64, with: item)
+        if i % 50000 == 0 { print("    Sequential: \(i)/\(lightItems)") }
+    }
+
+    // Phase 2: RandMemoHash (3 rounds)
+    for q in 0..<CACHE_ROUNDS {
+        print("  RandMemoHash round \(q+1)/\(CACHE_ROUNDS)...")
+        for i in 0..<lightItems {
+            // v = first word of cache[i] as LE uint32, mod lightItems
+            let off = i * 64
+            let t = UInt32(cache[off]) | (UInt32(cache[off+1]) << 8) |
+                    (UInt32(cache[off+2]) << 16) | (UInt32(cache[off+3]) << 24)
+            let v = Int(t) % lightItems
+            let w = (lightItems + (i - 1)) % lightItems
+            // XOR cache[v] and cache[w]
+            var xored = [UInt8](repeating: 0, count: 64)
+            for j in 0..<64 { xored[j] = cache[v * 64 + j] ^ cache[w * 64 + j] }
+            let hashed = keccak512(xored)
+            cache.replaceSubrange(off..<off+64, with: hashed)
+            if i % 50000 == 0 { print("    Round \(q+1): \(i)/\(lightItems)") }
+        }
+    }
+
+    print("  Light cache generated! Dataset items: \(datasetItems)")
+    return (lightItems, datasetItems, cache)
+}
+
 // MARK: - Main
 let PROGPOW_CACHE_WORDS = 4096
 let MAX_OUTPUTS = 4
 
+let MINE_HOURS: Double = 8
+let COOLDOWN_MINUTES: Double = 30 // gradually slow down before stopping
+
 print("🔥 KAWPOW Metal Miner for Ravencoin")
 print("====================================")
+print("⏱  Mining for \(Int(MINE_HOURS))h then \(Int(COOLDOWN_MINUTES))m cooldown")
 
 guard let device = MTLCreateSystemDefaultDevice() else { fatalError("No Metal device") }
 print("GPU: \(device.name)")
+let globalStart = Date()
+
+let sigintSrc = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+sigintSrc.setEventHandler { print("\n👋 Miner stopped."); exit(0) }
+signal(SIGINT, SIG_IGN)
+sigintSrc.resume()
 
 Task {
     do {
@@ -150,23 +325,39 @@ Task {
         var target64: UInt64 = 0
         for i in 0..<8 { target64 = (target64 << 8) | UInt64(targetBytes[i]) }
 
-        // 2. Load light cache
+        // 2. Load or generate light cache
         print("\n[2/6] Loading light cache...")
         let lightCachePath = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .deletingLastPathComponent().appendingPathComponent("epoch\(epoch).light").path
-        guard let lightData = try? Data(contentsOf: URL(fileURLWithPath: lightCachePath)) else {
-            print("  Light cache not found at \(lightCachePath)")
-            print("  Generate it: ./dump_light_cache \(epoch) epoch\(epoch)")
-            exit(1)
+        let lightItems: Int32
+        let datasetItems: Int32
+        let lightCacheBytes: Data
+        if let lightData = try? Data(contentsOf: URL(fileURLWithPath: lightCachePath)) {
+            lightItems = lightData.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
+            datasetItems = lightData.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
+            lightCacheBytes = lightData.subdata(in: 8..<lightData.count)
+            print("  Loaded from cache file")
+        } else {
+            print("  Cache file not found, generating for epoch \(epoch)...")
+            let gen = generateLightCache(epoch: epoch)
+            lightItems = Int32(gen.lightItems)
+            datasetItems = Int32(gen.datasetItems)
+            lightCacheBytes = Data(gen.cache)
+            // Save for next time
+            var header = Data(count: 8)
+            header.withUnsafeMutableBytes { ptr in
+                ptr.storeBytes(of: lightItems, toByteOffset: 0, as: Int32.self)
+                ptr.storeBytes(of: datasetItems, toByteOffset: 4, as: Int32.self)
+            }
+            try (header + lightCacheBytes).write(to: URL(fileURLWithPath: lightCachePath))
+            print("  Saved to \(lightCachePath)")
         }
-        let lightItems = lightData.withUnsafeBytes { $0.load(fromByteOffset: 0, as: Int32.self) }
-        let datasetItems = lightData.withUnsafeBytes { $0.load(fromByteOffset: 4, as: Int32.self) }
-        print("  Light cache: \(lightItems) items (\(lightData.count / 1024 / 1024) MB)")
+        print("  Light cache: \(lightItems) items (\(lightCacheBytes.count / 1024 / 1024) MB)")
         print("  Dataset items: \(datasetItems)")
 
         // Upload light cache to GPU
-        let lightBuffer = lightData.withUnsafeBytes { bytes in
-            device.makeBuffer(bytes: bytes.baseAddress! + 8, length: Int(lightItems) * 64, options: .storageModeShared)!
+        let lightBuffer = lightCacheBytes.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!, length: Int(lightItems) * 64, options: .storageModeShared)!
         }
 
         // 3. Generate DAG on GPU
@@ -198,7 +389,7 @@ Task {
         let library = try await device.makeLibrary(source: shaderSource, options: nil)
 
         let dagPipeline = try await device.makeComputePipelineState(function: library.makeFunction(name: "generate_dag")!)
-        let searchPipeline = try await device.makeComputePipelineState(function: library.makeFunction(name: "kawpow_search")!)
+        var searchPipeline = try await device.makeComputePipelineState(function: library.makeFunction(name: "kawpow_search")!)
         print("  DAG gen pipeline: \(dagPipeline.maxTotalThreadsPerThreadgroup) threads")
         print("  Search pipeline: \(searchPipeline.maxTotalThreadsPerThreadgroup) threads")
 
@@ -267,8 +458,14 @@ Task {
 
         // Recompile kernel if progSeed changed
         if newProgSeed != progSeed || prevHeaderHash == "" {
-            print("  Recompiling kernel for height \(newHeight) (progSeed \(newProgSeed))...")
-            // TODO: recompile searchPipeline with new progPowLoop
+            progSeed = newProgSeed
+            print("  Compiling kernel for progSeed \(progSeed)...")
+            let newProgPowLoop = generateProgPowLoop(progSeed: progSeed, dagElements: dagElements)
+            let newShaderSource = try String(contentsOfFile: shaderPath, encoding: .utf8)
+                .replacingOccurrences(of: "// GENERATED_PROGPOW_LOOP", with: newProgPowLoop)
+            let newLibrary = try await device.makeLibrary(source: newShaderSource, options: nil)
+            searchPipeline = try await device.makeComputePipelineState(
+                function: newLibrary.makeFunction(name: "kawpow_search")!)
         }
 
         print("\n  Mining block \(newHeight) | Header: \(headerHashHex.prefix(16))...")
@@ -297,7 +494,7 @@ Task {
         let nonceBuffer = device.makeBuffer(bytes: &startNonce, length: 8, options: .storageModeShared)!
         var targetVal = target64
         let targetBuffer = device.makeBuffer(bytes: &targetVal, length: 8, options: .storageModeShared)!
-        var dagElemsVal = dagElements
+        _ = dagElements
 
         let threadsPerGroup = min(256, searchPipeline.maxTotalThreadsPerThreadgroup)
         let threadsPerDispatch = 256 * 64  // 16384 hashes per dispatch
@@ -342,7 +539,7 @@ Task {
                 let resultPtr = resultsBuffer.contents()
                 for i in 0..<min(Int(resultCount), MAX_OUTPUTS) {
                     // SearchResults layout: count(4) + gid[4](16) + mix[4][8](128) + nonce[4](32)
-                    let gidOffset = 4 + i * 4
+                    let _ = 4 + i * 4 // gidOffset unused
                     let mixOffset = 4 + MAX_OUTPUTS * 4 + i * 32
                     // SearchResults struct has padding before nonce[] for 8-byte alignment
             let nonceArrayOffset = ((4 + MAX_OUTPUTS * 4 + MAX_OUTPUTS * 32 + 7) / 8) * 8 // align to 8
@@ -390,7 +587,29 @@ Task {
                 let elapsed = Date().timeIntervalSince(miningStart)
                 let hashRate = Double(totalHashes) / elapsed
                 let mh = hashRate / 1_000_000
-                print("  \(String(format: "%.2f MH/s", mh)) | \(totalHashes) hashes | \(String(format: "%.0fs", elapsed))")
+                let totalElapsed = Date().timeIntervalSince(globalStart)
+                let hoursElapsed = totalElapsed / 3600
+                let balance = try? await rpcCall("getwalletinfo") as? [String: Any]
+                let bal = (balance?["balance"] as? Double) ?? 0
+                let immBal = (balance?["immature_balance"] as? Double) ?? 0
+                print("  \(String(format: "%.2f MH/s", mh)) | \(totalHashes) hashes | \(String(format: "%.1fh", hoursElapsed)) | bal: \(String(format: "%.0f", bal))+\(String(format: "%.0f", immBal)) tRVN")
+            }
+
+            // Check mining time limit
+            let totalElapsedH = Date().timeIntervalSince(globalStart) / 3600
+            if totalElapsedH >= MINE_HOURS + COOLDOWN_MINUTES / 60 {
+                print("\n⏱  Mining time limit reached. Stopping gracefully.")
+                print("  Total time: \(String(format: "%.1fh", totalElapsedH))")
+                exit(0)
+            }
+            // Cooldown: reduce hash rate in last 30 min by sleeping between batches
+            if totalElapsedH >= MINE_HOURS {
+                let cooldownProgress = (totalElapsedH - MINE_HOURS) / (COOLDOWN_MINUTES / 60)
+                let sleepMs = UInt32(cooldownProgress * 500) // 0-500ms delay
+                if batch % 100 == 0 {
+                    print("  🔻 Cooldown: \(String(format: "%.0f%%", cooldownProgress * 100)) — reducing hash rate")
+                }
+                usleep(sleepMs * 1000)
             }
 
             // Refresh header every 500 batches
@@ -408,7 +627,8 @@ Task {
         if found {
             let elapsed = Date().timeIntervalSince(miningStart)
             print("\n🏆 BLOCK MINED! \(totalHashes) hashes in \(String(format: "%.1f", elapsed))s")
-            break // exit outer loop
+            print("  Starting next block...\n")
+            // continue outer loop to mine next block
         }
 
         } // end outer while loop
