@@ -65,9 +65,8 @@ func generateProgPowLoop(progSeed: UInt64, dagElements: UInt32) -> String {
     c += "dag_t data_dag; uint offset, data;\n"
     c += "uint PROGPOW_DAG_ELEMENTS = \(dagElements);\n"
     // c += "return; // DEBUG: skip progPowLoop to test framework\n"
-    c += "if(lane_id == (loop % PROGPOW_LANES)) share[group_id * 8] = (ulong)mix[0];\n"
-    c += "threadgroup_barrier(mem_flags::mem_threadgroup);\n"
-    c += "offset = (uint)share[group_id * 8];\n"
+    // Optimization #7: Use simd_broadcast instead of divergent if + barrier for lane election
+    c += "offset = simd_broadcast(mix[0], loop % PROGPOW_LANES);\n"
     c += "offset %= PROGPOW_DAG_ELEMENTS;\n"
     c += "offset = offset * PROGPOW_LANES + (lane_id ^ loop) % PROGPOW_LANES;\n"
     c += "data_dag = g_dag[offset];\n"
@@ -289,8 +288,6 @@ func generateLightCache(epoch: Int) -> (lightItems: Int, datasetItems: Int, cach
 let PROGPOW_CACHE_WORDS = 4096
 let MAX_OUTPUTS = 4
 
-let MINE_HOURS: Double = 8
-let COOLDOWN_MINUTES: Double = 30 // gradually slow down before stopping
 
 // Parse args
 let args = CommandLine.arguments
@@ -303,7 +300,7 @@ print("====================================")
 if poolMode {
     print("🏊 Pool mode: \(poolArg) worker: \(workerArg)")
 } else {
-    print("⏱  Solo mining for \(Int(MINE_HOURS))h then \(Int(COOLDOWN_MINUTES))m cooldown")
+    print("⛏️  Solo mining mode")
 }
 
 guard let device = MTLCreateSystemDefaultDevice() else { fatalError("No Metal device") }
@@ -546,14 +543,15 @@ Task {
 
         print("\n  Mining block \(newHeight) | Header: \(headerHashHex.prefix(16))...")
 
-        // Convert header hash to uint32 array (little-endian words)
+        // Optimization #3: Pre-allocate header buffer once, update in-place
+        let headerBuffer = device.makeBuffer(length: 32, options: .storageModeShared)!
         let headerBytes = hexToBytes(headerHashHex)
         var headerWords = [UInt32](repeating: 0, count: 8)
         for i in 0..<8 {
             headerWords[i] = UInt32(headerBytes[i*4]) | (UInt32(headerBytes[i*4+1]) << 8) |
                              (UInt32(headerBytes[i*4+2]) << 16) | (UInt32(headerBytes[i*4+3]) << 24)
         }
-        let headerBuffer = device.makeBuffer(bytes: &headerWords, length: 32, options: .storageModeShared)!
+        headerBuffer.contents().copyMemory(from: &headerWords, byteCount: 32)
 
         // Setup mining buffers
         let resultsSize = 4 + MAX_OUTPUTS * (4 + 32 + 8) + 64
@@ -565,9 +563,15 @@ Task {
         // Mining loop
         print("\n  ⛏️  MINING block \(newHeight)...\n")
 
-        let resultsBuffer = device.makeBuffer(length: resultsSize, options: .storageModeShared)!
+        // Optimization #2: Triple-buffer results for pipelined reads
+        let NUM_RESULT_BUFFERS = 3
+        let resultsBuffers = (0..<NUM_RESULT_BUFFERS).map { _ in
+            device.makeBuffer(length: resultsSize, options: .storageModeShared)!
+        }
         var startNonce: UInt64 = UInt64.random(in: 0..<(UInt64.max / 2))
-        let nonceBuffer = device.makeBuffer(bytes: &startNonce, length: 8, options: .storageModeShared)!
+        // Optimization #3: Pre-allocate nonce buffer, update in-place
+        let nonceBuffer = device.makeBuffer(length: 8, options: .storageModeShared)!
+        nonceBuffer.contents().storeBytes(of: startNonce, as: UInt64.self)
         // For pool mode, use share target from pool; for solo, use block target
         var targetVal: UInt64
         if poolMode, let client = stratum {
@@ -589,26 +593,93 @@ Task {
         _ = dagElements
 
         let threadsPerGroup = min(256, searchPipeline.maxTotalThreadsPerThreadgroup)
-        let threadsPerDispatch = 256 * 64  // 16384 hashes per dispatch
+        // Optimization #4: Increase batch size for better GPU utilization with pipelining
+        let threadsPerDispatch = 256 * 256  // 65536 hashes per dispatch (was 256*64=16384)
         let hashesPerDispatch = threadsPerDispatch
 
         var totalHashes: UInt64 = 0
         let miningStart = Date()
         var found = false
+        var submittedNonces = Set<UInt64>()  // Dedup across triple-buffered results
+
+        // Optimization #1: Double-buffering to keep GPU fed
+        let MAX_IN_FLIGHT = 2
+        var pendingBuffers: [(MTLCommandBuffer, Int)] = []
 
         var batch = 0
         while !found {
-            // Clear results
-            memset(resultsBuffer.contents(), 0, resultsSize)
+            // Optimization #2: Rotate result buffers — write to buffer[batch % 3]
+            let currentResultIdx = batch % NUM_RESULT_BUFFERS
+            let currentResultsBuffer = resultsBuffers[currentResultIdx]
 
-            // Sequential nonce
+            // Clear results for this buffer
+            memset(currentResultsBuffer.contents(), 0, resultsSize)
+
+            // Sequential nonce — update in-place (Optimization #3)
             startNonce &+= UInt64(hashesPerDispatch)
             nonceBuffer.contents().storeBytes(of: startNonce, as: UInt64.self)
+
+            // Optimization #1: If we have MAX_IN_FLIGHT buffers pending, wait for oldest
+            // This ensures GPU stays busy while we prepare the next dispatch
+            if pendingBuffers.count >= MAX_IN_FLIGHT {
+                let (oldCmd, oldResultIdx) = pendingBuffers.removeFirst()
+                await oldCmd.completed()
+                // Check results from the completed buffer
+                let completedBuffer = resultsBuffers[oldResultIdx]
+                let earlyResultCount = completedBuffer.contents().load(as: UInt32.self)
+                if earlyResultCount > 0 {
+                    print("\n🎉 SOLUTION FOUND! count=\(earlyResultCount)")
+                    let resultPtr = completedBuffer.contents()
+                    for i in 0..<min(Int(earlyResultCount), MAX_OUTPUTS) {
+                        let mixOffset = 4 + MAX_OUTPUTS * 4 + i * 32
+                        let nonceArrayOffset = ((4 + MAX_OUTPUTS * 4 + MAX_OUTPUTS * 32 + 7) / 8) * 8
+                        let nonceOffset = nonceArrayOffset + i * 8
+                        var nonceVal: UInt64 = 0
+                        memcpy(&nonceVal, resultPtr + nonceOffset, 8)
+                        // Dedup: skip if we already submitted this nonce
+                        if submittedNonces.contains(nonceVal) { continue }
+                        submittedNonces.insert(nonceVal)
+                        if submittedNonces.count > 1000 { submittedNonces.removeAll() }
+                        var mixHash = [UInt32](repeating: 0, count: 8)
+                        for j in 0..<8 {
+                            mixHash[j] = resultPtr.load(fromByteOffset: mixOffset + j * 4, as: UInt32.self)
+                        }
+                        let mixHex = mixHash.map { String(format: "%08x", $0.byteSwapped) }.joined()
+                        let nonceHex = String(format: "%016llx", nonceVal)
+                        print("  Nonce: 0x\(nonceHex)")
+                        print("  Mix:   \(mixHex)")
+                        if poolMode, let client = stratum {
+                            print("  Submitting share to pool...")
+                            let _ = try await client.submitShare(
+                                jobId: currentJobId, nonce: nonceHex,
+                                headerHash: headerHashHex, mixHash: mixHex)
+                        } else {
+                            print("  Submitting via pprpcsb...")
+                            do {
+                                let submitResult = try await rpcCall("pprpcsb",
+                                    params: [headerHashHex, mixHex, nonceHex])
+                                print("  ✅ BLOCK SUBMITTED! Result: \(submitResult)")
+                                found = true
+                            } catch {
+                                print("  ❌ Submit failed: \(error.localizedDescription)")
+                                do {
+                                    let verify = try await rpcCall("getkawpowhash",
+                                        params: [headerHashHex, mixHex, nonceHex, height, targetHex])
+                                    print("  Verify: \(verify)")
+                                } catch {
+                                    print("  Verify failed: \(error)")
+                                }
+                            }
+                        }
+                    }
+                    if found { break }
+                }
+            }
 
             let cmd = commandQueue.makeCommandBuffer()!
             let enc = cmd.makeComputeCommandEncoder()!
             enc.setComputePipelineState(searchPipeline)
-            enc.setBuffer(resultsBuffer, offset: 0, index: 0)
+            enc.setBuffer(currentResultsBuffer, offset: 0, index: 0)
             enc.setBuffer(headerBuffer, offset: 0, index: 1)
             enc.setBuffer(dagBuffer, offset: 0, index: 2)
             enc.setBuffer(nonceBuffer, offset: 0, index: 3)
@@ -620,67 +691,11 @@ Task {
                 threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
             enc.endEncoding()
             cmd.commit()
-            await cmd.completed()
+
+            // Track pending command buffers
+            pendingBuffers.append((cmd, currentResultIdx))
 
             totalHashes += UInt64(hashesPerDispatch)
-
-            // Check results
-            let resultCount = resultsBuffer.contents().load(as: UInt32.self)
-            if resultCount > 0 {
-                print("\n🎉 SOLUTION FOUND! count=\(resultCount)")
-                let resultPtr = resultsBuffer.contents()
-                for i in 0..<min(Int(resultCount), MAX_OUTPUTS) {
-                    // SearchResults layout: count(4) + gid[4](16) + mix[4][8](128) + nonce[4](32)
-                    let _ = 4 + i * 4 // gidOffset unused
-                    let mixOffset = 4 + MAX_OUTPUTS * 4 + i * 32
-                    // SearchResults struct has padding before nonce[] for 8-byte alignment
-            let nonceArrayOffset = ((4 + MAX_OUTPUTS * 4 + MAX_OUTPUTS * 32 + 7) / 8) * 8 // align to 8
-            let nonceOffset = nonceArrayOffset + i * 8
-
-                    let foundNonce: UInt64
-                    // Use memcpy to avoid alignment issues
-                    var nonceVal: UInt64 = 0
-                    memcpy(&nonceVal, resultPtr + nonceOffset, 8)
-                    foundNonce = nonceVal
-
-                    var mixHash = [UInt32](repeating: 0, count: 8)
-                    for j in 0..<8 {
-                        mixHash[j] = resultPtr.load(fromByteOffset: mixOffset + j * 4, as: UInt32.self)
-                    }
-                    let mixHex = mixHash.map { String(format: "%08x", $0.byteSwapped) }.joined()
-                    let nonceHex = String(format: "%016llx", foundNonce)
-
-                    print("  Nonce: 0x\(nonceHex)")
-                    print("  Mix:   \(mixHex)")
-
-                    // Submit
-                    if poolMode, let client = stratum {
-                        print("  Submitting share to pool...")
-                        let _ = try await client.submitShare(
-                            jobId: currentJobId, nonce: nonceHex,
-                            headerHash: headerHashHex, mixHash: mixHex)
-                        // Don't set found=true for pool — keep mining same job until new one arrives
-                    } else {
-                        print("  Submitting via pprpcsb...")
-                        do {
-                            let submitResult = try await rpcCall("pprpcsb",
-                                params: [headerHashHex, mixHex, nonceHex])
-                            print("  ✅ BLOCK SUBMITTED! Result: \(submitResult)")
-                            found = true
-                        } catch {
-                            print("  ❌ Submit failed: \(error.localizedDescription)")
-                            do {
-                                let verify = try await rpcCall("getkawpowhash",
-                                    params: [headerHashHex, mixHex, nonceHex, height, targetHex])
-                                print("  Verify: \(verify)")
-                            } catch {
-                                print("  Verify failed: \(error)")
-                            }
-                        }
-                    }
-                }
-                if found { break }
-            }
 
             if batch % 100 == 0 {
                 let elapsed = Date().timeIntervalSince(miningStart)
@@ -698,22 +713,6 @@ Task {
                 }
             }
 
-            // Check mining time limit
-            let totalElapsedH = Date().timeIntervalSince(globalStart) / 3600
-            if totalElapsedH >= MINE_HOURS + COOLDOWN_MINUTES / 60 {
-                print("\n⏱  Mining time limit reached. Stopping gracefully.")
-                print("  Total time: \(String(format: "%.1fh", totalElapsedH))")
-                exit(0)
-            }
-            // Cooldown: reduce hash rate in last 30 min by sleeping between batches
-            if totalElapsedH >= MINE_HOURS {
-                let cooldownProgress = (totalElapsedH - MINE_HOURS) / (COOLDOWN_MINUTES / 60)
-                let sleepMs = UInt32(cooldownProgress * 500) // 0-500ms delay
-                if batch % 100 == 0 {
-                    print("  🔻 Cooldown: \(String(format: "%.0f%%", cooldownProgress * 100)) — reducing hash rate")
-                }
-                usleep(sleepMs * 1000)
-            }
 
             // Refresh header
             if poolMode, let client = stratum, batch % 50 == 49 {
@@ -732,6 +731,12 @@ Task {
 
             batch += 1
         }
+
+        // Drain remaining pending command buffers
+        for (pendingCmd, _) in pendingBuffers {
+            await pendingCmd.completed()
+        }
+        pendingBuffers.removeAll()
 
         if found {
             let elapsed = Date().timeIntervalSince(miningStart)

@@ -376,12 +376,17 @@ kernel void kawpow_search(
     uint group_id = lid / PROGPOW_LANES;
 
     threadgroup uint* c_dag = shared_mem;
-    for (uint word = lid * PROGPOW_DAG_LOADS; word < PROGPOW_CACHE_WORDS;
-         word += 256 * PROGPOW_DAG_LOADS) {
-        if (word / PROGPOW_DAG_LOADS < dag_elements_buf[0]) {
-            dag_t load = g_dag[word / PROGPOW_DAG_LOADS];
+    // Optimization #6: Coalesced DAG loading — threads load contiguous dag_t entries
+    // so adjacent threads access adjacent memory addresses for better cache line utilization.
+    // Thread 0 loads dag entry 0, thread 1 loads dag entry 1, etc.
+    uint dag_elems = dag_elements_buf[0];
+    for (uint entry = lid; entry < PROGPOW_CACHE_WORDS / PROGPOW_DAG_LOADS;
+         entry += 256) {
+        if (entry < dag_elems) {
+            dag_t load = g_dag[entry];
+            uint base = entry * PROGPOW_DAG_LOADS;
             for (int i = 0; i < PROGPOW_DAG_LOADS; i++)
-                c_dag[word + i] = load.s[i];
+                c_dag[base + i] = load.s[i];
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -417,16 +422,24 @@ kernel void kawpow_search(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     hash32_t digest;
+    // Optimization #5 & #7: Use simd_broadcast to eliminate threadgroup barriers
+    // for lane communication within the PROGPOW_LANES loop.
+    // Apple Silicon SIMD width is 32, PROGPOW_LANES is 16, so all lanes within
+    // a SIMD group can communicate via simd_broadcast without barriers.
+    // However, threads across SIMD groups (different groups within the threadgroup)
+    // still need threadgroup memory for the progPowLoop share[] usage.
     for (uint h = 0; h < PROGPOW_LANES; h++) {
         uint mix[PROGPOW_REGS];
 
-        if (lane_id == h)
-            share[group_id * 8] = ((ulong)s2_1 << 32) | s2_0;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Optimization #7: Use simd_broadcast to get the elected lane's seed
+        // instead of divergent if(lane_id == h) + barrier pattern.
+        // Broadcast s2_0 and s2_1 from lane h to all lanes in the SIMD group.
+        uint seed_s0 = simd_broadcast(s2_0, h);
+        uint seed_s1 = simd_broadcast(s2_1, h);
 
         uint seed_share[2];
-        seed_share[0] = (uint)(share[group_id * 8] & 0xFFFFFFFF);
-        seed_share[1] = (uint)(share[group_id * 8] >> 32);
+        seed_share[0] = seed_s0;
+        seed_share[1] = seed_s1;
         fill_mix(seed_share, lane_id, mix);
 
         for (uint l = 0; l < PROGPOW_CNT_DAG; l++)
@@ -440,13 +453,12 @@ kernel void kawpow_search(
         for (int i = 0; i < 8; i++)
             digest_temp.uint32s[i] = FNV_OFFSET_BASIS;
 
-        threadgroup uint* share_u32 = (threadgroup uint*)share;
-        share_u32[group_id * PROGPOW_LANES + lane_id] = mix_hash;
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        for (int i = 0; i < PROGPOW_LANES; i++)
-            digest_temp.uint32s[i % 8] = fnv1a_func(digest_temp.uint32s[i % 8],
-                share_u32[group_id * PROGPOW_LANES + i]);
+        // Optimization #5: Use simd_broadcast to gather mix_hash from all lanes
+        // instead of writing to threadgroup memory + barrier + reading back.
+        for (int i = 0; i < PROGPOW_LANES; i++) {
+            uint lane_mix = simd_broadcast(mix_hash, i);
+            digest_temp.uint32s[i % 8] = fnv1a_func(digest_temp.uint32s[i % 8], lane_mix);
+        }
 
         if (h == lane_id)
             digest = digest_temp;
