@@ -9,6 +9,13 @@
     "swift-dependencies": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/main.swiftdeps",
     "diagnostics": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/main.dia"
   },
+  "/Users/zimski/projects/oss/kawpow-metal/Sources/stratum.swift": {
+    "dependencies": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.d",
+    "object": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.swift.o",
+    "swiftmodule": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum~partial.swiftmodule",
+    "swift-dependencies": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.swiftdeps",
+    "diagnostics": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.dia"
+  },
   "/Users/zimski/projects/oss/kawpow-metal/Sources/verify.swift": {
     "dependencies": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/verify.d",
     "object": "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/verify.swift.o",

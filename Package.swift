@@ -5,6 +5,6 @@ let package = Package(
     name: "kawpow-metal",
     platforms: [.macOS(.v15)],
     targets: [
-        .executableTarget(name: "kawpow-metal", path: "Sources"),
+        .executableTarget(name: "kawpow-metal", path: "Sources", exclude: ["KawpowShader.metal.template"]),
     ]
 )

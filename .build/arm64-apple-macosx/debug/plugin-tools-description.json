@@ -28,6 +28,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/zimski/projects/oss/kawpow-metal/Sources/stratum.swift"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/zimski/projects/oss/kawpow-metal/Sources/verify.swift"
         },
         {
@@ -44,6 +48,7 @@
       "moduleOutputPath" : "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/Modules/kawpow_metal.swiftmodule",
       "objects" : [
         "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/main.swift.o",
+        "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.swift.o",
         "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/verify.swift.o"
       ],
       "otherArguments" : [
@@ -67,6 +72,7 @@
         "-entry-point-function-name",
         "-Xfrontend",
         "kawpow_metal_main",
+        "-color-diagnostics",
         "-swift-version",
         "6",
         "-plugin-path",
@@ -109,6 +115,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/verify.swift.o"
         },
         {
@@ -119,6 +129,7 @@
       "prepareForIndexing" : false,
       "sources" : [
         "/Users/zimski/projects/oss/kawpow-metal/Sources/main.swift",
+        "/Users/zimski/projects/oss/kawpow-metal/Sources/stratum.swift",
         "/Users/zimski/projects/oss/kawpow-metal/Sources/verify.swift"
       ],
       "tempsPath" : "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build",
@@ -137,6 +148,7 @@
       "kawpow_metal",
       "-c",
       "/Users/zimski/projects/oss/kawpow-metal/Sources/main.swift",
+      "/Users/zimski/projects/oss/kawpow-metal/Sources/stratum.swift",
       "/Users/zimski/projects/oss/kawpow-metal/Sources/verify.swift",
       "-I",
       "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/Modules",
@@ -160,6 +172,7 @@
       "-entry-point-function-name",
       "-Xfrontend",
       "kawpow_metal_main",
+      "-color-diagnostics",
       "-swift-version",
       "6",
       "-plugin-path",
@@ -241,6 +254,10 @@
         },
         {
           "kind" : "file",
+          "name" : "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/stratum.swift.o"
+        },
+        {
+          "kind" : "file",
           "name" : "/Users/zimski/projects/oss/kawpow-metal/.build/arm64-apple-macosx/debug/kawpow_metal.build/verify.swift.o"
         }
       ],
@@ -256,6 +273,10 @@
         {
           "kind" : "file",
           "name" : "/Users/zimski/projects/oss/kawpow-metal/Sources/main.swift"
+        },
+        {
+          "kind" : "file",
+          "name" : "/Users/zimski/projects/oss/kawpow-metal/Sources/stratum.swift"
         },
         {
           "kind" : "file",

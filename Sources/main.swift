@@ -292,9 +292,19 @@ let MAX_OUTPUTS = 4
 let MINE_HOURS: Double = 8
 let COOLDOWN_MINUTES: Double = 30 // gradually slow down before stopping
 
+// Parse args
+let args = CommandLine.arguments
+let poolMode = args.contains("--pool")
+let poolArg = args.firstIndex(of: "--pool").flatMap { i in i + 1 < args.count ? args[i + 1] : nil } ?? "127.0.0.1:3456"
+let workerArg = args.firstIndex(of: "--worker").flatMap { i in i + 1 < args.count ? args[i + 1] : nil } ?? "miner.metal01"
+
 print("🔥 KAWPOW Metal Miner for Ravencoin")
 print("====================================")
-print("⏱  Mining for \(Int(MINE_HOURS))h then \(Int(COOLDOWN_MINUTES))m cooldown")
+if poolMode {
+    print("🏊 Pool mode: \(poolArg) worker: \(workerArg)")
+} else {
+    print("⏱  Solo mining for \(Int(MINE_HOURS))h then \(Int(COOLDOWN_MINUTES))m cooldown")
+}
 
 guard let device = MTLCreateSystemDefaultDevice() else { fatalError("No Metal device") }
 print("GPU: \(device.name)")
@@ -307,18 +317,45 @@ sigintSrc.resume()
 
 Task {
     do {
-        // 1. Get block template
-        print("\n[1/6] Getting block template...")
-        let tmpl = try await rpcCall("getblocktemplate", params: [["rules":["segwit"]]]) as! [String:Any]
-        let height = tmpl["height"] as! Int
-        let _ = tmpl["bits"] as! String
-        let targetHex = tmpl["target"] as! String
-        let epoch = height / 7500
-        var progSeed = UInt64(height / 3)  // PROGPOW_PERIOD = 3
-        let address = try await rpcCall("getnewaddress") as! String
-        print("  Height: \(height), Epoch: \(epoch)")
-        print("  Target: \(targetHex.prefix(20))...")
-        print("  Mining to: \(address)")
+        // 1. Get initial work (solo: from ravend, pool: from stratum)
+        var stratum: StratumClient? = nil
+
+        let height: Int
+        let targetHex: String
+        let epoch: Int
+        var progSeed: UInt64
+
+        if poolMode {
+            let parts = poolArg.split(separator: ":")
+            let poolHost = String(parts[0])
+            let poolPort = parts.count > 1 ? Int(parts[1])! : 3456
+            print("\n[1/6] Connecting to pool \(poolHost):\(poolPort)...")
+            let client = StratumClient(host: poolHost, port: poolPort, worker: workerArg)
+            stratum = client
+            try await client.connect()
+
+            // Wait for first job
+            print("  Waiting for first job...")
+            let job = try await client.waitForJob()
+            height = job.height
+            targetHex = job.target
+            epoch = height / 7500
+            progSeed = UInt64(height / 3)
+            print("  Height: \(height), Epoch: \(epoch)")
+            print("  Target: \(targetHex.prefix(20))...")
+        } else {
+            print("\n[1/6] Getting block template...")
+            let tmpl = try await rpcCall("getblocktemplate", params: [["rules":["segwit"]]]) as! [String:Any]
+            height = tmpl["height"] as! Int
+            let _ = tmpl["bits"] as! String
+            targetHex = tmpl["target"] as! String
+            epoch = height / 7500
+            progSeed = UInt64(height / 3)
+            let address = try await rpcCall("getnewaddress") as! String
+            print("  Height: \(height), Epoch: \(epoch)")
+            print("  Target: \(targetHex.prefix(20))...")
+            print("  Mining to: \(address)")
+        }
 
         // Compute target as little-endian uint64 for shader comparison
         let targetBytes = hexToBytes(targetHex)
@@ -414,9 +451,13 @@ Task {
 
             if offset % (batchSize * 10) == 0 {
                 await cmd.completed()
-                let pct = Double(offset) / Double(dagHash512Count) * 100
+                let pct = Double(offset) / Double(dagHash512Count)
                 let elapsed = Date().timeIntervalSince(dagGenStart)
-                print("  \(String(format: "%.1f%%", pct)) (\(Int(elapsed))s)")
+                let barWidth = 30
+                let filled = Int(pct * Double(barWidth))
+                let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: barWidth - filled)
+                print("  [\(bar)] \(String(format: "%5.1f%%", pct * 100)) (\(Int(elapsed))s)", terminator: "\r")
+                fflush(stdout)
             }
         }
         // Wait for last batch
@@ -424,6 +465,8 @@ Task {
         finalCmd.commit()
         await finalCmd.completed()
         let dagTime = Date().timeIntervalSince(dagGenStart)
+        let doneBar = String(repeating: "█", count: 30)
+        print("  [\(doneBar)] 100.0% (\(Int(dagTime))s)")
         print("  DAG generated in \(String(format: "%.1f", dagTime))s")
 
         // Verify DAG against C++ reference
@@ -445,15 +488,48 @@ Task {
 
         // 5-6. Mining loop with auto-refresh
         var headerHashHex = ""
+        var currentJobId = ""
+        var lastJobVersion = 0
+
         while true { // outer loop for new templates
-        let freshTmpl = try await rpcCall("getblocktemplate", params: [["rules":["segwit"]]]) as! [String:Any]
-        guard let newHeaderHash = freshTmpl["pprpcheader"] as? String else {
-            print("  ERROR: No pprpcheader. Start ravend with -miningaddress=<addr>")
-            exit(1)
+        let newHeaderHash: String
+        let newHeight: Int
+
+        if poolMode, let client = stratum {
+            // Wait for a job if we don't have one yet
+            if lastJobVersion == 0 {
+                while true {
+                    let ver = await client.getJobVersion()
+                    if ver > 0, let job = await client.latestJob {
+                        lastJobVersion = ver
+                        newHeaderHash = job.headerHash
+                        newHeight = job.height
+                        currentJobId = job.id
+                        break
+                    }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            } else {
+                // Check for new job (called after inner loop breaks)
+                let ver = await client.getJobVersion()
+                guard let job = await client.latestJob else { continue }
+                lastJobVersion = ver
+                newHeaderHash = job.headerHash
+                newHeight = job.height
+                currentJobId = job.id
+            }
+        } else {
+            let freshTmpl = try await rpcCall("getblocktemplate", params: [["rules":["segwit"]]]) as! [String:Any]
+            guard let hdr = freshTmpl["pprpcheader"] as? String else {
+                print("  ERROR: No pprpcheader. Start ravend with -miningaddress=<addr>")
+                exit(1)
+            }
+            newHeaderHash = hdr
+            newHeight = freshTmpl["height"] as! Int
         }
+
         let prevHeaderHash = headerHashHex
         headerHashHex = newHeaderHash
-        let newHeight = freshTmpl["height"] as! Int
         let newProgSeed = UInt64(newHeight / 3)
 
         // Recompile kernel if progSeed changed
@@ -492,7 +568,23 @@ Task {
         let resultsBuffer = device.makeBuffer(length: resultsSize, options: .storageModeShared)!
         var startNonce: UInt64 = UInt64.random(in: 0..<(UInt64.max / 2))
         let nonceBuffer = device.makeBuffer(bytes: &startNonce, length: 8, options: .storageModeShared)!
-        var targetVal = target64
+        // For pool mode, use share target from pool; for solo, use block target
+        var targetVal: UInt64
+        if poolMode, let client = stratum {
+            let poolTarget = await client.getTarget()
+            print("  Pool share target: \(poolTarget.isEmpty ? "(empty!)" : poolTarget.prefix(20) + "...")")
+            if !poolTarget.isEmpty {
+                let tb = hexToBytes(poolTarget)
+                var t64: UInt64 = 0
+                for i in 0..<min(8, tb.count) { t64 = (t64 << 8) | UInt64(tb[i]) }
+                targetVal = t64
+                print("  Target64: 0x\(String(format: "%016llx", targetVal))")
+            } else {
+                targetVal = target64
+            }
+        } else {
+            targetVal = target64
+        }
         let targetBuffer = device.makeBuffer(bytes: &targetVal, length: 8, options: .storageModeShared)!
         _ = dagElements
 
@@ -561,22 +653,29 @@ Task {
                     print("  Nonce: 0x\(nonceHex)")
                     print("  Mix:   \(mixHex)")
 
-                    // Submit to node!
-                    print("  Submitting via pprpcsb...")
-                    do {
-                        let submitResult = try await rpcCall("pprpcsb",
-                            params: [headerHashHex, mixHex, nonceHex])
-                        print("  ✅ BLOCK SUBMITTED! Result: \(submitResult)")
-                        found = true
-                    } catch {
-                        print("  ❌ Submit failed: \(error.localizedDescription)")
-                        // Verify hash
+                    // Submit
+                    if poolMode, let client = stratum {
+                        print("  Submitting share to pool...")
+                        let _ = try await client.submitShare(
+                            jobId: currentJobId, nonce: nonceHex,
+                            headerHash: headerHashHex, mixHash: mixHex)
+                        // Don't set found=true for pool — keep mining same job until new one arrives
+                    } else {
+                        print("  Submitting via pprpcsb...")
                         do {
-                            let verify = try await rpcCall("getkawpowhash",
-                                params: [headerHashHex, mixHex, nonceHex, height, targetHex])
-                            print("  Verify: \(verify)")
+                            let submitResult = try await rpcCall("pprpcsb",
+                                params: [headerHashHex, mixHex, nonceHex])
+                            print("  ✅ BLOCK SUBMITTED! Result: \(submitResult)")
+                            found = true
                         } catch {
-                            print("  Verify failed: \(error)")
+                            print("  ❌ Submit failed: \(error.localizedDescription)")
+                            do {
+                                let verify = try await rpcCall("getkawpowhash",
+                                    params: [headerHashHex, mixHex, nonceHex, height, targetHex])
+                                print("  Verify: \(verify)")
+                            } catch {
+                                print("  Verify failed: \(error)")
+                            }
                         }
                     }
                 }
@@ -589,10 +688,14 @@ Task {
                 let mh = hashRate / 1_000_000
                 let totalElapsed = Date().timeIntervalSince(globalStart)
                 let hoursElapsed = totalElapsed / 3600
-                let balance = try? await rpcCall("getwalletinfo") as? [String: Any]
-                let bal = (balance?["balance"] as? Double) ?? 0
-                let immBal = (balance?["immature_balance"] as? Double) ?? 0
-                print("  \(String(format: "%.2f MH/s", mh)) | \(totalHashes) hashes | \(String(format: "%.1fh", hoursElapsed)) | bal: \(String(format: "%.0f", bal))+\(String(format: "%.0f", immBal)) tRVN")
+                if poolMode {
+                    print("  \(String(format: "%.2f MH/s", mh)) | \(totalHashes) hashes | \(String(format: "%.1fh", hoursElapsed))")
+                } else {
+                    let balance = try? await rpcCall("getwalletinfo") as? [String: Any]
+                    let bal = (balance?["balance"] as? Double) ?? 0
+                    let immBal = (balance?["immature_balance"] as? Double) ?? 0
+                    print("  \(String(format: "%.2f MH/s", mh)) | \(totalHashes) hashes | \(String(format: "%.1fh", hoursElapsed)) | bal: \(String(format: "%.0f", bal))+\(String(format: "%.0f", immBal)) tRVN")
+                }
             }
 
             // Check mining time limit
@@ -612,8 +715,14 @@ Task {
                 usleep(sleepMs * 1000)
             }
 
-            // Refresh header every 500 batches
-            if batch % 500 == 499 {
+            // Refresh header
+            if poolMode, let client = stratum, batch % 50 == 49 {
+                let ver = await client.getJobVersion()
+                if ver != lastJobVersion {
+                    print("  ⚡ New job from pool!")
+                    break
+                }
+            } else if !poolMode && batch % 500 == 499 {
                 if let newTmpl = try? await rpcCall("getblocktemplate", params: [["rules":["segwit"]]]) as? [String:Any],
                    let newHeader = newTmpl["pprpcheader"] as? String, newHeader != headerHashHex {
                     print("  ⚡ New block! Refreshing template...")
