@@ -1,0 +1,482 @@
+#include <metal_stdlib>
+using namespace metal;
+
+// ============================================================
+// KAWPOW Metal Miner - Full Implementation
+// ============================================================
+
+#define PROGPOW_LANES 16
+#define PROGPOW_REGS 32
+#define PROGPOW_DAG_LOADS 4
+#define PROGPOW_CACHE_WORDS 4096
+#define PROGPOW_CNT_DAG 64
+#define MAX_OUTPUTS 4
+
+#define FNV_PRIME 0x01000193u
+#define FNV_OFFSET_BASIS 0x811c9dc5u
+
+#define ROTL32(x, n) (((x) << ((n) % 32)) | ((x) >> (32 - ((n) % 32))))
+#define ROTR32(x, n) (((x) >> ((n) % 32)) | ((x) << (32 - ((n) % 32))))
+
+#define NODE_WORDS 16
+#define ETHASH_DATASET_PARENTS 512
+
+typedef struct { uint s[PROGPOW_DAG_LOADS]; } dag_t;
+typedef struct { uint uint32s[8]; } hash32_t;
+typedef struct { uint words[NODE_WORDS]; } hash512_t;
+
+typedef struct {
+    atomic_uint count;
+    uint gid[MAX_OUTPUTS];
+    uint mix[MAX_OUTPUTS][8];
+    ulong nonce[MAX_OUTPUTS];
+} SearchResults;
+
+constant uint ravencoin_rndc[15] = {
+    0x00000072, 0x00000041, 0x00000056, 0x00000045, 0x0000004E,
+    0x00000043, 0x0000004F, 0x00000049, 0x0000004E, 0x0000004B,
+    0x00000041, 0x00000057, 0x00000050, 0x0000004F, 0x00000057
+};
+
+constant uint keccakf_rndc[24] = {
+    0x00000001, 0x00008082, 0x0000808a, 0x80008000,
+    0x0000808b, 0x80000001, 0x80008081, 0x00008009,
+    0x0000008a, 0x00000088, 0x80008009, 0x8000000a,
+    0x8000808b, 0x0000008b, 0x00008089, 0x00008003,
+    0x00008002, 0x00000080, 0x0000800a, 0x8000000a,
+    0x80008081, 0x00008080, 0x80000001, 0x80008008
+};
+
+// Keccak-f[1600] round constants (for DAG generation)
+constant ulong keccakf_1600_rndc[24] = {
+    0x0000000000000001UL, 0x0000000000008082UL, 0x800000000000808aUL,
+    0x8000000080008000UL, 0x000000000000808bUL, 0x0000000080000001UL,
+    0x8000000080008081UL, 0x8000000000008009UL, 0x000000000000008aUL,
+    0x0000000000000088UL, 0x0000000080008009UL, 0x000000008000000aUL,
+    0x000000008000808bUL, 0x800000000000008bUL, 0x8000000000008089UL,
+    0x8000000000008003UL, 0x8000000000008002UL, 0x8000000000000080UL,
+    0x000000000000800aUL, 0x800000008000000aUL, 0x8000000080008081UL,
+    0x8000000000008080UL, 0x0000000080000001UL, 0x8000000080008008UL
+};
+
+// ============================================================
+// Keccak-f[800] for KAWPOW mining
+// ============================================================
+
+// Direct port of ethash_keccakf800 from keccakf800.c
+void keccak_f800(thread uint state[25]) {
+    uint Aba=state[0],  Abe=state[1],  Abi=state[2],  Abo=state[3],  Abu=state[4];
+    uint Aga=state[5],  Age=state[6],  Agi=state[7],  Ago=state[8],  Agu=state[9];
+    uint Aka=state[10], Ake=state[11], Aki=state[12], Ako=state[13], Aku=state[14];
+    uint Ama=state[15], Ame=state[16], Ami=state[17], Amo=state[18], Amu=state[19];
+    uint Asa=state[20], Ase=state[21], Asi=state[22], Aso=state[23], Asu=state[24];
+    uint Ba, Be, Bi, Bo, Bu, Da, De, Di, Do, Du;
+    uint Eba,Ebe,Ebi,Ebo,Ebu,Ega,Ege,Egi,Ego,Egu;
+    uint Eka,Eke,Eki,Eko,Eku,Ema,Eme,Emi,Emo,Emu;
+    uint Esa,Ese,Esi,Eso,Esu;
+
+    for (int round = 0; round < 22; round += 2) {
+        // Round 0: Axx -> Exx
+        Ba=Aba^Aga^Aka^Ama^Asa; Be=Abe^Age^Ake^Ame^Ase;
+        Bi=Abi^Agi^Aki^Ami^Asi; Bo=Abo^Ago^Ako^Amo^Aso;
+        Bu=Abu^Agu^Aku^Amu^Asu;
+        Da=Bu^ROTL32(Be,1); De=Ba^ROTL32(Bi,1); Di=Be^ROTL32(Bo,1);
+        Do=Bi^ROTL32(Bu,1); Du=Bo^ROTL32(Ba,1);
+
+        Ba=Aba^Da; Be=ROTL32(Age^De,12); Bi=ROTL32(Aki^Di,11);
+        Bo=ROTL32(Amo^Do,21); Bu=ROTL32(Asu^Du,14);
+        Eba=Ba^(~Be&Bi)^keccakf_rndc[round]; Ebe=Be^(~Bi&Bo);
+        Ebi=Bi^(~Bo&Bu); Ebo=Bo^(~Bu&Ba); Ebu=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Abo^Do,28); Be=ROTL32(Agu^Du,20); Bi=ROTL32(Aka^Da,3);
+        Bo=ROTL32(Ame^De,13); Bu=ROTL32(Asi^Di,29);
+        Ega=Ba^(~Be&Bi); Ege=Be^(~Bi&Bo); Egi=Bi^(~Bo&Bu);
+        Ego=Bo^(~Bu&Ba); Egu=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Abe^De,1); Be=ROTL32(Agi^Di,6); Bi=ROTL32(Ako^Do,25);
+        Bo=ROTL32(Amu^Du,8); Bu=ROTL32(Asa^Da,18);
+        Eka=Ba^(~Be&Bi); Eke=Be^(~Bi&Bo); Eki=Bi^(~Bo&Bu);
+        Eko=Bo^(~Bu&Ba); Eku=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Abu^Du,27); Be=ROTL32(Aga^Da,4); Bi=ROTL32(Ake^De,10);
+        Bo=ROTL32(Ami^Di,15); Bu=ROTL32(Aso^Do,24);
+        Ema=Ba^(~Be&Bi); Eme=Be^(~Bi&Bo); Emi=Bi^(~Bo&Bu);
+        Emo=Bo^(~Bu&Ba); Emu=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Abi^Di,30); Be=ROTL32(Ago^Do,23); Bi=ROTL32(Aku^Du,7);
+        Bo=ROTL32(Ama^Da,9); Bu=ROTL32(Ase^De,2);
+        Esa=Ba^(~Be&Bi); Ese=Be^(~Bi&Bo); Esi=Bi^(~Bo&Bu);
+        Eso=Bo^(~Bu&Ba); Esu=Bu^(~Ba&Be);
+
+        // Round 1: Exx -> Axx
+        Ba=Eba^Ega^Eka^Ema^Esa; Be=Ebe^Ege^Eke^Eme^Ese;
+        Bi=Ebi^Egi^Eki^Emi^Esi; Bo=Ebo^Ego^Eko^Emo^Eso;
+        Bu=Ebu^Egu^Eku^Emu^Esu;
+        Da=Bu^ROTL32(Be,1); De=Ba^ROTL32(Bi,1); Di=Be^ROTL32(Bo,1);
+        Do=Bi^ROTL32(Bu,1); Du=Bo^ROTL32(Ba,1);
+
+        Ba=Eba^Da; Be=ROTL32(Ege^De,12); Bi=ROTL32(Eki^Di,11);
+        Bo=ROTL32(Emo^Do,21); Bu=ROTL32(Esu^Du,14);
+        Aba=Ba^(~Be&Bi)^keccakf_rndc[round+1]; Abe=Be^(~Bi&Bo);
+        Abi=Bi^(~Bo&Bu); Abo=Bo^(~Bu&Ba); Abu=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Ebo^Do,28); Be=ROTL32(Egu^Du,20); Bi=ROTL32(Eka^Da,3);
+        Bo=ROTL32(Eme^De,13); Bu=ROTL32(Esi^Di,29);
+        Aga=Ba^(~Be&Bi); Age=Be^(~Bi&Bo); Agi=Bi^(~Bo&Bu);
+        Ago=Bo^(~Bu&Ba); Agu=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Ebe^De,1); Be=ROTL32(Egi^Di,6); Bi=ROTL32(Eko^Do,25);
+        Bo=ROTL32(Emu^Du,8); Bu=ROTL32(Esa^Da,18);
+        Aka=Ba^(~Be&Bi); Ake=Be^(~Bi&Bo); Aki=Bi^(~Bo&Bu);
+        Ako=Bo^(~Bu&Ba); Aku=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Ebu^Du,27); Be=ROTL32(Ega^Da,4); Bi=ROTL32(Eke^De,10);
+        Bo=ROTL32(Emi^Di,15); Bu=ROTL32(Eso^Do,24);
+        Ama=Ba^(~Be&Bi); Ame=Be^(~Bi&Bo); Ami=Bi^(~Bo&Bu);
+        Amo=Bo^(~Bu&Ba); Amu=Bu^(~Ba&Be);
+
+        Ba=ROTL32(Ebi^Di,30); Be=ROTL32(Ego^Do,23); Bi=ROTL32(Eku^Du,7);
+        Bo=ROTL32(Ema^Da,9); Bu=ROTL32(Ese^De,2);
+        Asa=Ba^(~Be&Bi); Ase=Be^(~Bi&Bo); Asi=Bi^(~Bo&Bu);
+        Aso=Bo^(~Bu&Ba); Asu=Bu^(~Ba&Be);
+    }
+    state[0]=Aba; state[1]=Abe; state[2]=Abi; state[3]=Abo; state[4]=Abu;
+    state[5]=Aga; state[6]=Age; state[7]=Agi; state[8]=Ago; state[9]=Agu;
+    state[10]=Aka; state[11]=Ake; state[12]=Aki; state[13]=Ako; state[14]=Aku;
+    state[15]=Ama; state[16]=Ame; state[17]=Ami; state[18]=Amo; state[19]=Amu;
+    state[20]=Asa; state[21]=Ase; state[22]=Asi; state[23]=Aso; state[24]=Asu;
+}
+
+// ============================================================
+// Keccak-f[1600] for DAG generation (Keccak-512)
+// ============================================================
+
+void keccak_f1600(thread ulong st[25]) {
+    // Canonical Keccak-f[1600] with lookup tables for Rho Pi
+    for (int round = 0; round < 24; round++) {
+        ulong bc[5], t;
+        // Theta
+        for (int i = 0; i < 5; i++)
+            bc[i] = st[i] ^ st[i + 5] ^ st[i + 10] ^ st[i + 15] ^ st[i + 20];
+        for (int i = 0; i < 5; i++) {
+            t = bc[(i + 4) % 5] ^ ((bc[(i + 1) % 5] << 1) | (bc[(i + 1) % 5] >> 63));
+            for (int j = 0; j < 25; j += 5)
+                st[j + i] ^= t;
+        }
+
+        // Rho Pi — using the standard permutation
+        t = st[1];
+        st[ 1] = (st[ 6] << 44) | (st[ 6] >> 20);
+        st[ 6] = (st[ 9] << 20) | (st[ 9] >> 44);
+        st[ 9] = (st[22] << 61) | (st[22] >>  3);
+        st[22] = (st[14] << 39) | (st[14] >> 25);
+        st[14] = (st[20] << 18) | (st[20] >> 46);
+        st[20] = (st[ 2] << 62) | (st[ 2] >>  2);
+        st[ 2] = (st[12] << 43) | (st[12] >> 21);
+        st[12] = (st[13] << 25) | (st[13] >> 39);
+        st[13] = (st[19] <<  8) | (st[19] >> 56);
+        st[19] = (st[23] << 56) | (st[23] >>  8);
+        st[23] = (st[15] << 41) | (st[15] >> 23);
+        st[15] = (st[ 4] << 27) | (st[ 4] >> 37);
+        st[ 4] = (st[24] << 14) | (st[24] >> 50);
+        st[24] = (st[21] <<  2) | (st[21] >> 62);
+        st[21] = (st[ 8] << 55) | (st[ 8] >>  9);
+        st[ 8] = (st[16] << 45) | (st[16] >> 19);
+        st[16] = (st[ 5] << 36) | (st[ 5] >> 28);
+        st[ 5] = (st[ 3] << 28) | (st[ 3] >> 36);
+        st[ 3] = (st[18] << 21) | (st[18] >> 43);
+        st[18] = (st[17] << 15) | (st[17] >> 49);
+        st[17] = (st[11] << 10) | (st[11] >> 54);
+        st[11] = (st[ 7] <<  6) | (st[ 7] >> 58);
+        st[ 7] = (st[10] <<  3) | (st[10] >> 61);
+        st[10] = (t      <<  1) | (t      >> 63);
+
+        // Chi
+        for (int j = 0; j < 25; j += 5) {
+            ulong tmp[5];
+            for (int i = 0; i < 5; i++) tmp[i] = st[j + i];
+            for (int i = 0; i < 5; i++)
+                st[j + i] = tmp[i] ^ ((~tmp[(i + 1) % 5]) & tmp[(i + 2) % 5]);
+        }
+
+        st[0] ^= keccakf_1600_rndc[round];
+    }
+}
+
+void keccak_512(thread uint data[16]) {
+    ulong st[25] = {0};
+    // Absorb 64 bytes (8 x uint64) into state
+    for (int i = 0; i < 8; i++)
+        st[i] = ((ulong)data[i * 2 + 1] << 32) | data[i * 2];
+    // Keccak-512: rate = 72 bytes = 9 words, capacity = 128 bytes
+    // Padding: 0x01 at byte 64 (word 8, byte 0) + 0x80 at byte 71 (word 8, byte 7)
+    st[8] ^= 0x8000000000000001UL;
+    keccak_f1600(st);
+    // Extract 64 bytes (8 x uint64)
+    for (int i = 0; i < 8; i++) {
+        data[i * 2] = (uint)(st[i] & 0xFFFFFFFF);
+        data[i * 2 + 1] = (uint)(st[i] >> 32);
+    }
+}
+
+// ============================================================
+// FNV helpers
+// ============================================================
+
+uint fnv1a_func(uint h, uint d) {
+    return (h ^ d) * FNV_PRIME;
+}
+
+uint fnv_func(uint a, uint b) {
+    return a * FNV_PRIME ^ b;
+}
+
+// ============================================================
+// DAG Generation Kernel
+// ============================================================
+
+kernel void generate_dag(
+    device hash512_t* g_dag [[buffer(0)]],
+    device const hash512_t* g_light [[buffer(1)]],
+    constant uint* params [[buffer(2)]],  // [0]=start, [1]=dag_total, [2]=light_items
+    uint gid [[thread_position_in_grid]]
+) {
+    uint start = params[0];
+    uint dag_total = params[1];
+    uint light_items = params[2];
+    uint node_index = start + gid;
+    if (node_index >= dag_total) return;
+
+    // Copy light cache item
+    hash512_t node;
+    uint src_idx = node_index % light_items;
+    for (int i = 0; i < NODE_WORDS; i++)
+        node.words[i] = g_light[src_idx].words[i];
+    node.words[0] ^= node_index;
+
+    // Keccak-512
+    keccak_512(node.words);
+
+    // Mix with parent nodes
+    for (uint i = 0; i < ETHASH_DATASET_PARENTS; i++) {
+        uint parent = fnv_func(node_index ^ i, node.words[i % NODE_WORDS]) % light_items;
+        for (uint w = 0; w < NODE_WORDS; w++)
+            node.words[w] = fnv_func(node.words[w], g_light[parent].words[w]);
+    }
+
+    // Final Keccak-512
+    keccak_512(node.words);
+    g_dag[node_index] = node;
+}
+
+// ============================================================
+// Mix initialization
+// ============================================================
+
+void fill_mix(thread uint* seed, uint lane_id, thread uint mix[PROGPOW_REGS]) {
+    uint fnv_hash = FNV_OFFSET_BASIS;
+    uint z = fnv1a_func(fnv_hash, seed[0]);
+    uint w = fnv1a_func(z, seed[1]);
+    uint jsr = fnv1a_func(w, lane_id);
+    uint jcong = fnv1a_func(jsr, lane_id);
+
+    for (int i = 0; i < PROGPOW_REGS; i++) {
+        z = 36969 * (z & 65535) + (z >> 16);
+        w = 18000 * (w & 65535) + (w >> 16);
+        uint mwc = (z << 16) + w;
+        jcong = 69069 * jcong + 1234567;
+        jsr ^= (jsr << 17); jsr ^= (jsr >> 13); jsr ^= (jsr << 5);
+        mix[i] = (mwc ^ jcong) + jsr;
+    }
+}
+
+// ============================================================
+// Generated ProgPow Loop (epoch-specific, injected at compile time)
+// ============================================================
+
+// GENERATED_PROGPOW_LOOP
+
+// ============================================================
+// Debug: test keccak_f800 only
+// ============================================================
+
+kernel void test_keccak(
+    constant hash32_t* g_header [[buffer(0)]],
+    device uint* g_output [[buffer(1)]],
+    constant ulong* nonce_buf [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    ulong nonce = nonce_buf[0];
+    uint state[25] = {0};
+    for (int i = 0; i < 8; i++)
+        state[i] = g_header->uint32s[i];
+    state[8] = (uint)(nonce & 0xFFFFFFFF);
+    state[9] = (uint)(nonce >> 32);
+    for (int i = 10; i < 25; i++)
+        state[i] = ravencoin_rndc[i - 10];
+    keccak_f800(state);
+    for (int i = 0; i < 8; i++)
+        g_output[i] = state[i];
+}
+
+// ============================================================
+// Debug: dump fill_mix output for lane 0
+// ============================================================
+
+kernel void test_fill_mix(
+    constant hash32_t* g_header [[buffer(0)]],
+    device uint* g_output [[buffer(1)]],
+    constant ulong* nonce_buf [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    ulong nonce = nonce_buf[0];
+    // Compute state2 via keccak
+    uint state[25] = {0};
+    for (int i = 0; i < 8; i++) state[i] = g_header->uint32s[i];
+    state[8] = (uint)(nonce & 0xFFFFFFFF);
+    state[9] = (uint)(nonce >> 32);
+    for (int i = 10; i < 25; i++) state[i] = ravencoin_rndc[i - 10];
+    keccak_f800(state);
+
+    // Copy state2 BEFORE anything else
+    uint state2_copy[8];
+    for (int i = 0; i < 8; i++) state2_copy[i] = state[i];
+
+    // seed = state2[0..1]
+    uint seed[2] = {state2_copy[0], state2_copy[1]};
+    uint mix[PROGPOW_REGS];
+    fill_mix(seed, 0, mix); // lane 0
+
+    // Output saved state2 then mix
+    for (int i = 0; i < 8; i++) g_output[i] = state2_copy[i];
+    for (int i = 0; i < 32; i++) g_output[8 + i] = mix[i];
+}
+
+// ============================================================
+// Main Mining Kernel
+// ============================================================
+
+kernel void kawpow_search(
+    device SearchResults* g_output [[buffer(0)]],
+    constant hash32_t* g_header [[buffer(1)]],
+    device const dag_t* g_dag [[buffer(2)]],
+    constant ulong* start_nonce_buf [[buffer(3)]],
+    constant ulong* target_buf [[buffer(4)]],
+    constant uint* dag_elements_buf [[buffer(5)]],
+    threadgroup uint* shared_mem [[threadgroup(0)]],
+    uint lid [[thread_index_in_threadgroup]],
+    uint gid [[thread_position_in_grid]]
+) {
+    ulong start_nonce = start_nonce_buf[0];
+    ulong target = target_buf[0];
+    // Each thread/lane gets its OWN nonce
+    ulong nonce = start_nonce + gid;
+
+    uint lane_id = lid & (PROGPOW_LANES - 1);
+    uint group_id = lid / PROGPOW_LANES;
+
+    threadgroup uint* c_dag = shared_mem;
+    for (uint word = lid * PROGPOW_DAG_LOADS; word < PROGPOW_CACHE_WORDS;
+         word += 256 * PROGPOW_DAG_LOADS) {
+        if (word / PROGPOW_DAG_LOADS < dag_elements_buf[0]) {
+            dag_t load = g_dag[word / PROGPOW_DAG_LOADS];
+            for (int i = 0; i < PROGPOW_DAG_LOADS; i++)
+                c_dag[word + i] = load.s[i];
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Share memory: 16 groups x 64 bytes each (matching OpenCL shuffle_t share[HASHES_PER_GROUP])
+    // Each group occupies 8 ulongs = 16 uint32s = 64 bytes.
+    // ulong indexing: share[group_id * 8]  (stride 64 bytes per group)
+    // uint  indexing: share_u32[group_id * 16 + lane_id]  (stride 64 bytes per group)
+    threadgroup uint* share_base = shared_mem + PROGPOW_CACHE_WORDS;
+    threadgroup ulong* share = (threadgroup ulong*)(share_base);
+
+    // Compute initial keccak and save state2 to device output buffer
+    // Use a per-thread device buffer to avoid stack clobbering
+    uint s2_0, s2_1, s2_2, s2_3, s2_4, s2_5, s2_6, s2_7;
+
+    {
+        uint state[25] = {0};
+        for (int i = 0; i < 8; i++)
+            state[i] = g_header->uint32s[i];
+        state[8] = (uint)(nonce & 0xFFFFFFFF);
+        state[9] = (uint)(nonce >> 32);
+        for (int i = 10; i < 25; i++)
+            state[i] = ravencoin_rndc[i - 10];
+        keccak_f800(state);
+        s2_0=state[0]; s2_1=state[1]; s2_2=state[2]; s2_3=state[3];
+        s2_4=state[4]; s2_5=state[5]; s2_6=state[6]; s2_7=state[7];
+    }
+    // Force compiler to keep all s2 values by storing to threadgroup memory
+    // (read back later for final keccak)
+    threadgroup uint* tg_s2 = share_base + (PROGPOW_LANES * 16) + lid * 8;
+    tg_s2[0]=s2_0; tg_s2[1]=s2_1; tg_s2[2]=s2_2; tg_s2[3]=s2_3;
+    tg_s2[4]=s2_4; tg_s2[5]=s2_5; tg_s2[6]=s2_6; tg_s2[7]=s2_7;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    hash32_t digest;
+    for (uint h = 0; h < PROGPOW_LANES; h++) {
+        uint mix[PROGPOW_REGS];
+
+        if (lane_id == h)
+            share[group_id * 8] = ((ulong)s2_1 << 32) | s2_0;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint seed_share[2];
+        seed_share[0] = (uint)(share[group_id * 8] & 0xFFFFFFFF);
+        seed_share[1] = (uint)(share[group_id * 8] >> 32);
+        fill_mix(seed_share, lane_id, mix);
+
+        for (uint l = 0; l < PROGPOW_CNT_DAG; l++)
+            progPowLoop(l, mix, g_dag, c_dag, share, lane_id, group_id);
+
+        uint mix_hash = FNV_OFFSET_BASIS;
+        for (int i = 0; i < PROGPOW_REGS; i++)
+            mix_hash = fnv1a_func(mix_hash, mix[i]);
+
+        hash32_t digest_temp;
+        for (int i = 0; i < 8; i++)
+            digest_temp.uint32s[i] = FNV_OFFSET_BASIS;
+
+        threadgroup uint* share_u32 = (threadgroup uint*)share;
+        share_u32[group_id * PROGPOW_LANES + lane_id] = mix_hash;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (int i = 0; i < PROGPOW_LANES; i++)
+            digest_temp.uint32s[i % 8] = fnv1a_func(digest_temp.uint32s[i % 8],
+                share_u32[group_id * PROGPOW_LANES + i]);
+
+        if (h == lane_id)
+            digest = digest_temp;
+    }
+
+    // Final keccak — read state2 from threadgroup memory
+    ulong result;
+    {
+        uint state[25] = {0};
+        for (int i = 0; i < 8; i++)
+            state[i] = tg_s2[i];
+        for (int i = 8; i < 16; i++)
+            state[i] = digest.uint32s[i - 8];
+        for (int i = 16; i < 25; i++)
+            state[i] = ravencoin_rndc[i - 16];
+        keccak_f800(state);
+        // Byte-swap the result (match OpenCL as_ulong(as_uchar8(res).s76543210))
+        ulong res = ((ulong)state[1] << 32) | state[0];
+        result = ((res & 0xFF) << 56) | ((res & 0xFF00) << 40) | ((res & 0xFF0000) << 24) |
+                 ((res & 0xFF000000) << 8) | ((res >> 8) & 0xFF000000) |
+                 ((res >> 24) & 0xFF0000) | ((res >> 40) & 0xFF00) | ((res >> 56) & 0xFF);
+    }
+
+    if (result <= target) {
+        uint slot = atomic_fetch_add_explicit(&g_output->count, 1u, memory_order_relaxed);
+        if (slot < MAX_OUTPUTS) {
+            g_output->gid[slot] = gid;
+            g_output->nonce[slot] = nonce;
+            for (int i = 0; i < 8; i++)
+                g_output->mix[slot][i] = digest.uint32s[i];
+        }
+    }
+}
