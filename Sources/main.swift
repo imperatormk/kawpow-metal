@@ -628,7 +628,7 @@ Task {
                 let completedBuffer = resultsBuffers[oldResultIdx]
                 let earlyResultCount = completedBuffer.contents().load(as: UInt32.self)
                 if earlyResultCount > 0 {
-                    print("\n🎉 SOLUTION FOUND! count=\(earlyResultCount)")
+                    print(poolMode ? "\n⛏️  Share found! count=\(earlyResultCount)" : "\n🎉 BLOCK FOUND! count=\(earlyResultCount)")
                     let resultPtr = completedBuffer.contents()
                     for i in 0..<min(Int(earlyResultCount), MAX_OUTPUTS) {
                         let mixOffset = 4 + MAX_OUTPUTS * 4 + i * 32
