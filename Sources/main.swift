@@ -466,22 +466,7 @@ Task {
         print("  [\(doneBar)] 100.0% (\(Int(dagTime))s)")
         print("  DAG generated in \(String(format: "%.1f", dagTime))s")
 
-        // Verify DAG against C++ reference
-        let dagPtr = dagBuffer.contents().bindMemory(to: UInt32.self, capacity: dagHash512Count * 16)
-        print("  DAG[0] words: ", terminator: "")
-        for w in 0..<4 { print("0x\(String(format: "%08x", dagPtr[w])) ", terminator: "") }
-        print("\n  Expected[0]:  0xa2a35c1e ...")
-        if dagPtr[0] == 0xa2a35c1e {
-            print("  ✅ DAG[0] matches reference!")
-        } else {
-            print("  ❌ DAG[0] MISMATCH! GPU Keccak-512 is broken.")
-            print("  Dumping first few DAG items for debugging...")
-            for item in 0..<3 {
-                print("    DAG[\(item)]: ", terminator: "")
-                for w in 0..<8 { print(String(format: "%08x", dagPtr[item * 16 + w]), terminator: " ") }
-                print()
-            }
-        }
+        print("  DAG generation complete")
 
         // 5-6. Mining loop with auto-refresh
         var headerHashHex = ""
