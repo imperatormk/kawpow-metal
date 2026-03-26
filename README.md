@@ -47,7 +47,7 @@ Requires a running `ravend` with `-miningaddress=YOUR_ADDRESS`:
 swift run kawpow-metal
 ```
 
-Connects to `127.0.0.1:8766` (mainnet) by default.
+Connects to `127.0.0.1:18766` (testnet) by default. Edit `main.swift` line 108 to change to mainnet port `8766`.
 
 ## Features
 
