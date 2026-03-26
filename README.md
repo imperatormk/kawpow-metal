@@ -15,7 +15,7 @@
 ```bash
 git clone https://github.com/imperatormk/kawpow-metal.git
 cd kawpow-metal
-swift run kawpow-metal --pool rvnswap.xyz:3456 --worker YOUR_RVN_ADDRESS.rig01
+swift run kawpow-metal --pool rvnswap.xyz:3458 --worker YOUR_RVN_ADDRESS.rig01
 ```
 
 That's it. No dependencies, no brew installs, no CUDA. Just Xcode command line tools.
@@ -36,7 +36,7 @@ swift run kawpow-metal --pool POOL_HOST:PORT --worker YOUR_ADDRESS.RIG_NAME
 
 Example with our pool:
 ```bash
-swift run kawpow-metal --pool rvnswap.xyz:3456 --worker RYourAddress.macbook
+swift run kawpow-metal --pool rvnswap.xyz:3458 --worker RYourAddress.macbook
 ```
 
 ### Solo Mining
@@ -47,7 +47,7 @@ Requires a running `ravend` with `-miningaddress=YOUR_ADDRESS`:
 swift run kawpow-metal
 ```
 
-Connects to `127.0.0.1:18766` (testnet) by default.
+Connects to `127.0.0.1:8766` (mainnet) by default.
 
 ## Features
 
